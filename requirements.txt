@@ -1,0 +1,16 @@
+# PyTorch si installa a parte dall'indice CPU (vedi il workflow)
+numpy
+scipy
+soundfile
+audioread
+soxr
+librosa
+music21
+mido
+verovio
+svglib
+reportlab
+moduleconf
+pretty_midi
+mir_eval
+yt-dlp

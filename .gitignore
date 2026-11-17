@@ -1,0 +1,10 @@
+__pycache__/
+venv/
+build/
+dist/
+prova_uscita/
+*.log
+*.pdf
+*.musicxml
+*.mid
+!tests/*.mid
