@@ -50,7 +50,7 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-VERSIONE = "2.6"
+VERSIONE = "3.0"
 
 # App compilata (installatore Windows): niente interprete Python separato, e
 # FFmpeg viaggia nella stessa cartella dell'eseguibile.
@@ -2565,90 +2565,385 @@ def run_pipeline(source: str, out_dir: str, title: str = "", composer: str = "",
 # INTERFACCIA GRAFICA
 # ─────────────────────────────────────────────────────────────────────────────
 
-def launch_gui():
+# Avanzamento: ogni messaggio della pipeline segna una tappa (percentuale).
+TAPPE = [("Scarico l'audio", 2), ("Carico l'audio", 4), ("Trascrizione", 6),
+         ("MIDI:", 50), ("Note rilevate", 58), ("Verifica sull'audio", 60),
+         ("Mani", 68), ("Abbellimenti", 72), ("Tempo:", 78), ("Quantizzazione", 83),
+         ("Tonalità", 85), ("Partitura:", 88), ("Impagino", 90), ("FATTO", 100)]
+NOME_TAPPA = {"Scarico l'audio": "Scarico da YouTube", "Carico l'audio": "Leggo l'audio",
+              "Trascrizione": "Trascrivo le note (la fase più lunga)",
+              "MIDI:": "Leggo il MIDI", "Note rilevate": "Note trascritte",
+              "Verifica sull'audio": "Confronto con l'audio originale",
+              "Mani": "Separo le mani", "Abbellimenti": "Cerco gli abbellimenti",
+              "Tempo:": "Riconosco tempo e battute", "Quantizzazione": "Allineo le durate",
+              "Tonalità": "Riconosco la tonalità", "Partitura:": "Scrivo la partitura",
+              "Impagino": "Impagino il PDF", "FATTO": "Fatto"}
+
+
+class Lettore:
+    """Riproduce MIDI e audio con il lettore integrato di Windows (MCI), senza
+    pacchetti aggiuntivi. Altrove non fa nulla."""
+
+    def __init__(self):
+        self.ok = sys.platform == "win32"
+        self.aperto = False
+        if self.ok:
+            import ctypes
+            self._mci = ctypes.windll.winmm.mciSendStringW
+            self._buf = ctypes.create_unicode_buffer(256)
+
+    def _cmd(self, s: str) -> str:
+        err = self._mci(s, self._buf, 255, 0)
+        if err:
+            raise RuntimeError(f"MCI {err}: {s}")
+        return self._buf.value
+
+    def suona(self, path: str):
+        if not self.ok:
+            raise RuntimeError("La riproduzione è disponibile solo su Windows.")
+        self.ferma()
+        tipo = "sequencer" if is_midi(path) else "mpegvideo"
+        self._cmd(f'open "{path}" type {tipo} alias brano')
+        self.aperto = True
+        self._cmd("set brano time format milliseconds")
+        self._cmd("play brano")
+
+    def stato(self) -> Tuple[str, int, int]:
+        if not (self.ok and self.aperto):
+            return "fermo", 0, 0
+        try:
+            return (self._cmd("status brano mode"), int(self._cmd("status brano position") or 0),
+                    int(self._cmd("status brano length") or 0))
+        except Exception:
+            return "fermo", 0, 0
+
+    def ferma(self):
+        if self.ok and self.aperto:
+            try:
+                self._mci("close brano", None, 0, 0)
+            except Exception:
+                pass
+        self.aperto = False
+
+
+def _impostazioni_path() -> str:
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "Partitura", "impostazioni.json")
+
+
+def _leggi_impostazioni() -> Dict:
+    try:
+        with open(_impostazioni_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _salva_impostazioni(d: Dict):
+    try:
+        os.makedirs(os.path.dirname(_impostazioni_path()), exist_ok=True)
+        with open(_impostazioni_path(), "w", encoding="utf-8") as f:
+            json.dump(d, f, indent=1, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _pagine_pdf(path: str, larghezza: int) -> List:
+    """Pagine del PDF come immagini Tk, larghe «larghezza» pixel."""
+    import pypdfium2 as pdfium
+    from PIL import ImageTk
+    doc = pdfium.PdfDocument(path)
+    out = []
+    try:
+        for i in range(len(doc)):
+            pg = doc[i]
+            scala = larghezza / pg.get_width()
+            out.append(ImageTk.PhotoImage(pg.render(scale=scala).to_pil()))
+    finally:
+        doc.close()
+    return out
+
+
+def launch_gui(prova: Optional[str] = None):
+    """Finestra principale. Con «prova» = file MIDI o audio, l'app si collauda
+    da sola: genera, mostra l'anteprima, apre il lettore e si chiude
+    (codice d'uscita 0 se tutto è andato)."""
+    import queue
+    import time
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
 
-    root = tk.Tk()
-    root.title(f"PARTITURA {VERSIONE} — audio → spartito PDF")
-    root.geometry("800x700")
+    try:
+        from tkinterdnd2 import TkinterDnD, DND_FILES
+        root = TkinterDnD.Tk()
+        dnd = True
+    except Exception:
+        root = tk.Tk()
+        dnd = False
+    root.title(f"Partitura {VERSIONE}")
+    root.geometry("1180x780")
+    root.minsize(940, 620)
+    try:
+        ico = os.path.join(os.path.dirname(sys.executable if CONGELATO else __file__), "partitura.ico")
+        if os.path.exists(ico):
+            root.iconbitmap(ico)
+    except Exception:
+        pass
 
+    st = ttk.Style()
+    try:
+        st.theme_use("vista" if sys.platform == "win32" else "clam")
+    except Exception:
+        pass
+    BLU, GRIGIO, CHIARO = "#2457a6", "#6b6b6b", "#f4f6fa"
+    st.configure("Titolo.TLabel", font=("Segoe UI", 15, "bold"))
+    st.configure("Nota.TLabel", foreground=GRIGIO, font=("Segoe UI", 8))
+    st.configure("Tappa.TLabel", font=("Segoe UI", 9, "bold"))
+    st.configure("Grande.TButton", font=("Segoe UI", 11, "bold"), padding=8)
+
+    imp = _leggi_impostazioni()
     v = dict(
         src=tk.StringVar(), tit=tk.StringVar(), aut=tk.StringVar(),
-        quant=tk.StringVar(value="media"), bpm=tk.StringVar(),
-        tempo=tk.StringVar(value="auto"), motore=tk.StringVar(value="auto"),
-        out=tk.StringVar(value=os.path.join(os.path.expanduser("~"), "Partiture")),
+        quant=tk.StringVar(value=imp.get("quant", "media")), bpm=tk.StringVar(),
+        tempo=tk.StringVar(value="auto"), motore=tk.StringVar(value=imp.get("motore", "auto")),
+        out=tk.StringVar(value=imp.get("out") or os.path.join(os.path.expanduser("~"), "Partiture")),
+        tappa=tk.StringVar(value="Pronto"), pct=tk.StringVar(value=""),
+        pagina=tk.StringVar(value=""), tempo_ascolto=tk.StringVar(value=""),
     )
-    b = dict(rosso=tk.BooleanVar(value=True), dinamiche=tk.BooleanVar(value=True),
-             pedale=tk.BooleanVar(value=True), staccati=tk.BooleanVar(value=True),
-             musescore=tk.BooleanVar(value=False))
+    b = {k: tk.BooleanVar(value=imp.get(k, d)) for k, d in
+         [("rosso", True), ("dinamiche", True), ("pedale", True),
+          ("staccati", True), ("musescore", False)]}
+    stato = {"ris": None, "pagine": [], "pag": 0, "lavoro": False,
+             "t0": 0.0, "pct": 0.0, "meta": 0.0, "esito": None, "audio": None}
+    coda: "queue.Queue" = queue.Queue()
+    lettore = Lettore()
 
-    pad = {"padx": 8, "pady": 4}
-    frm = ttk.Frame(root, padding=12)
-    frm.pack(fill="both", expand=True)
-    frm.columnconfigure(2, weight=1)
+    # ── struttura: colonna sinistra (comandi) | destra (anteprima e registro)
+    pan = ttk.PanedWindow(root, orient="horizontal")
+    pan.pack(fill="both", expand=True)
+    sx = ttk.Frame(pan, padding=(14, 12))
+    dx = ttk.Frame(pan, padding=(6, 12, 12, 6))
+    pan.add(sx, weight=0)
+    pan.add(dx, weight=1)
 
-    def riga(r, testo, var, nota=None, largo=True):
-        ttk.Label(frm, text=testo).grid(row=r, column=0, sticky="w", **pad)
-        e = ttk.Entry(frm, textvariable=var, width=60 if largo else 12)
-        e.grid(row=r, column=1, columnspan=2 if largo else 1, sticky="we" if largo else "w", **pad)
-        if nota:
-            ttk.Label(frm, text=nota, foreground="#666").grid(row=r, column=2, columnspan=2, sticky="w", **pad)
+    ttk.Label(sx, text="Partitura", style="Titolo.TLabel").pack(anchor="w")
+    ttk.Label(sx, text="audio di pianoforte → spartito PDF", style="Nota.TLabel").pack(anchor="w", pady=(0, 10))
+
+    # zona di rilascio
+    zona = tk.Label(sx, text="Trascina qui un file audio o MIDI\noppure clicca per sceglierlo",
+                    bg=CHIARO, fg=BLU, font=("Segoe UI", 10), relief="groove", bd=2,
+                    height=5, width=38, cursor="hand2", justify="center")
+    zona.pack(fill="x", pady=(0, 6))
+    ttk.Label(sx, text="…o incolla un link YouTube:", style="Nota.TLabel").pack(anchor="w")
+    e_src = ttk.Entry(sx, textvariable=v["src"])
+    e_src.pack(fill="x", pady=(0, 8))
+
+    def imposta_sorgente(p: str):
+        p = p.strip().strip('"').strip("{}")
+        if not p:
+            return
+        v["src"].set(p)
+        nome = p if is_youtube(p) else os.path.basename(p)
+        zona.config(text=f"✓ {nome}\n(clicca o trascina per cambiarlo)", fg="#1d7a3a")
+        if not is_youtube(p) and not v["tit"].get():
+            v["tit"].set(os.path.splitext(os.path.basename(p))[0].replace("_", " "))
+
+    def scegli(_=None):
+        p = filedialog.askopenfilename(filetypes=[
+            ("Audio e MIDI", "*.mp3 *.wav *.flac *.m4a *.ogg *.aac *.mid *.midi"), ("Tutti", "*.*")])
+        if p:
+            imposta_sorgente(p)
+
+    zona.bind("<Button-1>", scegli)
+    if dnd:
+        def rilascio(ev):
+            files = root.tk.splitlist(ev.data)
+            if files:
+                imposta_sorgente(files[0])
+            zona.config(bg=CHIARO)
+            return ev.action
+        for w in (zona, e_src):
+            w.drop_target_register(DND_FILES)
+            w.dnd_bind("<<Drop>>", rilascio)
+        zona.dnd_bind("<<DropEnter>>", lambda e: (zona.config(bg="#dde7f7"), e.action)[1])
+        zona.dnd_bind("<<DropLeave>>", lambda e: (zona.config(bg=CHIARO), e.action)[1])
+    else:
+        zona.config(text="Clicca per scegliere un file audio o MIDI")
+
+    griglia = ttk.Frame(sx)
+    griglia.pack(fill="x")
+    griglia.columnconfigure(1, weight=1)
+
+    def campo(r, testo, var, largo=True):
+        ttk.Label(griglia, text=testo).grid(row=r, column=0, sticky="w", pady=3)
+        e = ttk.Entry(griglia, textvariable=var, width=30 if largo else 8)
+        e.grid(row=r, column=1, sticky="we" if largo else "w", pady=3, padx=(8, 0))
         return e
 
-    riga(0, "Audio, MIDI o link YouTube:", v["src"])
+    def tendina(r, testo, var, valori):
+        ttk.Label(griglia, text=testo).grid(row=r, column=0, sticky="w", pady=3)
+        ttk.Combobox(griglia, textvariable=var, values=valori, state="readonly",
+                     width=10).grid(row=r, column=1, sticky="w", pady=3, padx=(8, 0))
 
-    def scegli():
-        p = filedialog.askopenfilename(filetypes=[
-            ("Audio e MIDI", "*.mp3 *.wav *.flac *.m4a *.ogg *.mid *.midi"), ("Tutti", "*.*")])
-        if p:
-            v["src"].set(p)
-            if not v["tit"].get():
-                v["tit"].set(os.path.splitext(os.path.basename(p))[0])
+    campo(0, "Titolo", v["tit"])
+    campo(1, "Autore", v["aut"])
+    tendina(2, "Quantizzazione", v["quant"], ["lieve", "media", "forte"])
+    ttk.Label(griglia, text="lieve = fedele all'esecuzione · forte = più semplice da leggere",
+              style="Nota.TLabel").grid(row=3, column=0, columnspan=2, sticky="w")
+    campo(4, "BPM", v["bpm"], largo=False)
+    ttk.Label(griglia, text="vuoto = automatico. Se il brano esce a velocità doppia,\n"
+              "indica il BPM che senti battendo il piede.",
+              style="Nota.TLabel").grid(row=5, column=0, columnspan=2, sticky="w")
+    tendina(6, "Tempo", v["tempo"], ["auto"] + TEMPI)
+    tendina(7, "Motore", v["motore"], ["auto", "transkun", "crnn"])
 
-    ttk.Button(frm, text="Sfoglia…", command=scegli).grid(row=0, column=3, **pad)
-    riga(1, "Titolo del brano:", v["tit"])
-    riga(2, "Autore:", v["aut"])
-    ttk.Separator(frm).grid(row=3, column=0, columnspan=4, sticky="we", pady=8)
-
-    def tendina(r, testo, var, valori, nota):
-        ttk.Label(frm, text=testo).grid(row=r, column=0, sticky="w", **pad)
-        ttk.Combobox(frm, textvariable=var, values=valori, state="readonly",
-                     width=12).grid(row=r, column=1, sticky="w", **pad)
-        ttk.Label(frm, text=nota, foreground="#666").grid(row=r, column=2, columnspan=2, sticky="w", **pad)
-
-    tendina(4, "Quantizzazione:", v["quant"], ["lieve", "media", "forte"],
-            "lieve = fedele all'esecuzione · forte = notazione semplice")
-    riga(5, "BPM:", v["bpm"], "vuoto = automatico (nei tempi composti: semiminima puntata)", largo=False)
-    tendina(6, "Tempo:", v["tempo"], ["auto"] + TEMPI, "auto = riconoscimento automatico")
-    tendina(7, "Motore:", v["motore"], ["auto", "transkun", "crnn"],
-            "auto = Transkun se installato, altrimenti CRNN")
-
-    box = ttk.Frame(frm)
-    box.grid(row=8, column=0, columnspan=4, sticky="w", **pad)
+    opz = ttk.LabelFrame(sx, text="Nello spartito", padding=6)
+    opz.pack(fill="x", pady=8)
     for i, (k, t) in enumerate([("rosso", "Note dubbie in rosso"), ("dinamiche", "Dinamiche"),
                                 ("pedale", "Pedale"), ("staccati", "Staccati"),
-                                ("musescore", "Impagina con MuseScore (se c'è)")]):
-        ttk.Checkbutton(box, text=t, variable=b[k]).grid(row=0, column=i, padx=6)
+                                ("musescore", "Impagina con MuseScore")]):
+        ttk.Checkbutton(opz, text=t, variable=b[k]).grid(row=i // 2, column=i % 2, sticky="w", padx=4)
 
-    riga(9, "Cartella di uscita:", v["out"])
-    ttk.Button(frm, text="…", width=4,
-               command=lambda: v["out"].set(filedialog.askdirectory() or v["out"].get())
-               ).grid(row=9, column=3, **pad)
+    cart = ttk.Frame(sx)
+    cart.pack(fill="x")
+    ttk.Label(cart, text="Salva in").pack(side="left")
+    ttk.Entry(cart, textvariable=v["out"]).pack(side="left", fill="x", expand=True, padx=6)
+    ttk.Button(cart, text="…", width=3,
+               command=lambda: v["out"].set(filedialog.askdirectory() or v["out"].get())).pack(side="left")
 
-    btn = ttk.Button(frm, text="GENERA PARTITURA")
-    btn.grid(row=10, column=0, columnspan=4, sticky="we", padx=8, pady=10)
-    txt = tk.Text(frm, height=16, wrap="word", bg="#1e1e1e", fg="#d4d4d4",
+    btn = ttk.Button(sx, text="GENERA PARTITURA", style="Grande.TButton")
+    btn.pack(fill="x", pady=(12, 6))
+    barra = ttk.Progressbar(sx, maximum=100, mode="determinate")
+    barra.pack(fill="x")
+    rg = ttk.Frame(sx)
+    rg.pack(fill="x")
+    ttk.Label(rg, textvariable=v["tappa"], style="Tappa.TLabel").pack(side="left")
+    ttk.Label(rg, textvariable=v["pct"], style="Nota.TLabel").pack(side="right")
+
+    # ── destra: anteprima e registro
+    nb = ttk.Notebook(dx)
+    nb.pack(fill="both", expand=True)
+    tab_ant = ttk.Frame(nb)
+    tab_log = ttk.Frame(nb)
+    nb.add(tab_ant, text="  Anteprima  ")
+    nb.add(tab_log, text="  Registro  ")
+
+    tela = tk.Canvas(tab_ant, bg="#8a8f98", highlightthickness=0)
+    sb = ttk.Scrollbar(tab_ant, orient="vertical", command=tela.yview)
+    tela.configure(yscrollcommand=sb.set)
+    sb.pack(side="right", fill="y")
+    tela.pack(side="left", fill="both", expand=True)
+    tela.create_text(20, 20, anchor="nw", fill="white", font=("Segoe UI", 12), tags="vuoto",
+                     text="Qui comparirà lo spartito.\n\nScegli un brano a sinistra e premi "
+                          "GENERA PARTITURA.")
+
+    txt = tk.Text(tab_log, wrap="word", bg="#1e1e1e", fg="#d4d4d4", relief="flat",
                   insertbackground="#d4d4d4", font=("Consolas", 9))
-    txt.grid(row=11, column=0, columnspan=4, sticky="nsew", padx=8, pady=4)
-    frm.rowconfigure(11, weight=1)
+    sbl = ttk.Scrollbar(tab_log, orient="vertical", command=txt.yview)
+    txt.configure(yscrollcommand=sbl.set)
+    sbl.pack(side="right", fill="y")
+    txt.pack(fill="both", expand=True)
 
-    def gui_log(line):
-        def _():
-            txt.insert("end", line + "\n")
-            txt.see("end")
-        root.after(0, _)
+    # barra dei comandi sotto l'anteprima
+    cmd = ttk.Frame(dx, padding=(0, 6, 0, 0))
+    cmd.pack(fill="x")
+    b_prec = ttk.Button(cmd, text="◀", width=3)
+    b_succ = ttk.Button(cmd, text="▶", width=3)
+    b_prec.pack(side="left")
+    ttk.Label(cmd, textvariable=v["pagina"], width=12, anchor="center").pack(side="left")
+    b_succ.pack(side="left")
+    ttk.Separator(cmd, orient="vertical").pack(side="left", fill="y", padx=10)
+    b_midi = ttk.Button(cmd, text="▶ Ascolta trascrizione")
+    b_orig = ttk.Button(cmd, text="▶ Ascolta originale")
+    b_stop = ttk.Button(cmd, text="■", width=3)
+    for w in (b_midi, b_orig, b_stop):
+        w.pack(side="left", padx=2)
+    ttk.Label(cmd, textvariable=v["tempo_ascolto"], style="Nota.TLabel").pack(side="left", padx=6)
+    b_cart = ttk.Button(cmd, text="Apri cartella")
+    b_pdf = ttk.Button(cmd, text="Apri PDF")
+    b_xml = ttk.Button(cmd, text="Apri MusicXML")
+    for w in (b_cart, b_xml, b_pdf):
+        w.pack(side="right", padx=2)
+    risultato_btn = [b_prec, b_succ, b_midi, b_orig, b_stop, b_cart, b_pdf, b_xml]
 
+    def abilita_risultati():
+        r = stato["ris"]
+        for w in risultato_btn:
+            w.state(["disabled"])
+        if not r:
+            return
+        b_cart.state(["!disabled"])
+        if r.get("xml"):
+            b_xml.state(["!disabled"])
+        if r["pdf"].lower().endswith(".pdf"):
+            b_pdf.state(["!disabled"])
+        if lettore.ok:
+            if os.path.exists(os.path.splitext(r["xml"])[0] + ".mid"):
+                b_midi.state(["!disabled"])
+            if stato["audio"]:
+                b_orig.state(["!disabled"])
+            b_stop.state(["!disabled"])
+        if len(stato["pagine"]) > 1:
+            b_prec.state(["!disabled"])
+            b_succ.state(["!disabled"])
+
+    abilita_risultati()
+
+    # ── anteprima
+    def mostra_pagina():
+        tela.delete("all")
+        pg = stato["pagine"]
+        if not pg:
+            return
+        i = stato["pag"] = max(0, min(stato["pag"], len(pg) - 1))
+        x = max(10, (tela.winfo_width() - pg[i].width()) // 2)
+        tela.create_image(x, 10, anchor="nw", image=pg[i])
+        tela.configure(scrollregion=(0, 0, tela.winfo_width(), pg[i].height() + 20))
+        tela.yview_moveto(0)
+        v["pagina"].set(f"pagina {i + 1} di {len(pg)}")
+
+    def carica_anteprima():
+        r = stato["ris"]
+        if not r or not r["pdf"].lower().endswith(".pdf"):
+            return
+        try:
+            larg = max(400, min(tela.winfo_width() - 30, 1000))
+            stato["pagine"] = _pagine_pdf(r["pdf"], larg)
+            stato["larg"] = larg
+            mostra_pagina()
+        except Exception as e:
+            tela.delete("all")
+            tela.create_text(20, 20, anchor="nw", fill="white", font=("Segoe UI", 11),
+                             text=f"Anteprima non disponibile ({type(e).__name__}).\n"
+                                  "Il PDF è comunque pronto: «Apri PDF».")
+
+    def sposta(d):
+        stato["pag"] += d
+        mostra_pagina()
+
+    b_prec.config(command=lambda: sposta(-1))
+    b_succ.config(command=lambda: sposta(+1))
+    tela.bind("<MouseWheel>", lambda e: tela.yview_scroll(int(-e.delta / 120), "units"))
+    root.bind("<Prior>", lambda e: sposta(-1))
+    root.bind("<Next>", lambda e: sposta(+1))
+
+    ridim = {"id": None}
+
+    def al_ridimensionamento(_):
+        if not stato["pagine"]:
+            return
+        if ridim["id"]:
+            root.after_cancel(ridim["id"])
+        def rifai():
+            if abs(min(tela.winfo_width() - 30, 1000) - stato.get("larg", 0)) > 40:
+                carica_anteprima()
+            else:
+                mostra_pagina()
+        ridim["id"] = root.after(250, rifai)
+
+    tela.bind("<Configure>", al_ridimensionamento)
+
+    # ── apertura file e ascolto
     def apri(path):
         try:
             if sys.platform == "win32":
@@ -2657,48 +2952,178 @@ def launch_gui():
                 subprocess.run(["open", path])
             else:
                 subprocess.run(["xdg-open", path])
-        except Exception:
-            pass
+        except Exception as e:
+            messagebox.showerror("Apertura", f"Non riesco ad aprire:\n{path}\n\n{e}")
 
+    b_pdf.config(command=lambda: apri(stato["ris"]["pdf"]))
+    b_xml.config(command=lambda: apri(stato["ris"]["xml"]))
+    b_cart.config(command=lambda: apri(os.path.dirname(stato["ris"]["xml"])))
+
+    def ascolta(path):
+        try:
+            lettore.suona(path)
+        except Exception as e:
+            messagebox.showerror("Ascolto", f"Non riesco a riprodurre il file.\n\n{e}")
+
+    b_midi.config(command=lambda: ascolta(os.path.splitext(stato["ris"]["xml"])[0] + ".mid"))
+    b_orig.config(command=lambda: ascolta(stato["audio"]))
+    b_stop.config(command=lambda: (lettore.ferma(), v["tempo_ascolto"].set("")))
+
+    def orologio():
+        modo, pos, lung = lettore.stato()
+        if modo == "playing" and lung:
+            v["tempo_ascolto"].set(f"{pos // 60000}:{pos // 1000 % 60:02d} / "
+                                   f"{lung // 60000}:{lung // 1000 % 60:02d}")
+        elif v["tempo_ascolto"].get():
+            v["tempo_ascolto"].set("")
+        root.after(500, orologio)
+
+    orologio()
+
+    # ── lavoro in sottofondo: i messaggi passano da una coda
     def worker(par):
         try:
-            res = run_pipeline(cb=gui_log, **par)
-            out = res["pdf"]
-            if out.lower().endswith(".pdf"):
-                root.after(0, lambda: apri(out))
-            else:
-                root.after(0, lambda: messagebox.showinfo(
-                    "Partitura pronta (MusicXML)",
-                    "Il PDF non è stato generato; la partitura è nel file MusicXML:\n\n"
-                    f"{out}\n\nSi apre con MuseScore o su flat.io."))
+            res = run_pipeline(cb=lambda line: coda.put(("riga", line)), **par)
+            coda.put(("fatto", res))
         except Exception as e:
             import traceback
-            gui_log("\nERRORE: " + str(e))
-            gui_log(traceback.format_exc())
-            testo = str(e)                      # «e» sparisce all'uscita dall'except
-            root.after(0, lambda: messagebox.showerror("Errore", testo))
-        finally:
-            root.after(0, lambda: btn.config(state="normal", text="GENERA PARTITURA"))
+            coda.put(("riga", "\nERRORE: " + str(e)))
+            coda.put(("riga", traceback.format_exc()))
+            coda.put(("errore", str(e)))
+
+    def avanza(line: str):
+        for chiave, pct in TAPPE:
+            if chiave in line and pct >= stato["pct"]:
+                stato["pct"] = pct
+                v["tappa"].set(NOME_TAPPA[chiave])
+                succ = [p for _, p in TAPPE if p > pct]
+                stato["meta"] = succ[0] - 1 if succ else 100
+                break
+
+    def ciclo():
+        try:
+            while True:
+                tipo, x = coda.get_nowait()
+                if tipo == "riga":
+                    txt.insert("end", x + "\n")
+                    txt.see("end")
+                    avanza(x)
+                elif tipo == "fatto":
+                    fine(x, None)
+                elif tipo == "errore":
+                    fine(None, x)
+        except queue.Empty:
+            pass
+        if stato["lavoro"]:
+            # dentro una tappa la barra avanza piano verso la successiva
+            stato["pct"] += (stato["meta"] - stato["pct"]) * 0.004
+            barra["value"] = stato["pct"]
+            s = int(time.time() - stato["t0"])
+            v["pct"].set(f"{int(stato['pct'])}% · {s // 60}:{s % 60:02d}")
+        root.after(100, ciclo)
+
+    def fine(res, errore):
+        stato["lavoro"] = False
+        btn.state(["!disabled"])
+        btn.config(text="GENERA PARTITURA")
+        if errore:
+            stato["esito"] = False
+            barra["value"] = 0
+            v["tappa"].set("Errore — dettagli nel Registro")
+            nb.select(tab_log)
+            if not prova:
+                messagebox.showerror("Errore", errore)
+            return
+        stato["esito"] = True
+        stato["ris"] = res
+        barra["value"] = 100
+        rep = res.get("report", {})
+        v["tappa"].set(f"Fatto · {rep.get('battute', '?')} battute · {rep.get('tempo', '')} · "
+                       f"{rep.get('tonalita', '')}")
+        v["pct"].set("")
+        nb.select(tab_ant)
+        carica_anteprima()
+        abilita_risultati()
+        if not res["pdf"].lower().endswith(".pdf"):
+            nb.select(tab_log)
+            if not prova:
+                messagebox.showinfo("Partitura pronta (MusicXML)",
+                                    "Il PDF non è stato generato: il motivo è nel Registro.\n"
+                                    "La partitura è nel file MusicXML (si apre con MuseScore).")
 
     def start():
-        if not v["src"].get().strip():
-            messagebox.showwarning("Sorgente", "Indica un file audio, un MIDI o un link YouTube.")
+        if stato["lavoro"]:
+            return
+        src = v["src"].get().strip().strip('"')
+        if not src:
+            messagebox.showwarning("Brano", "Trascina un file audio o MIDI, oppure incolla un link YouTube.")
             return
         try:
             bpm = float(v["bpm"].get().replace(",", ".")) if v["bpm"].get().strip() else None
         except ValueError:
-            messagebox.showerror("BPM", "BPM non valido.")
+            messagebox.showerror("BPM", "Il BPM deve essere un numero (es. 72).")
             return
-        par = dict(source=v["src"].get().strip().strip('"'), out_dir=v["out"].get().strip(),
+        par = dict(source=src, out_dir=v["out"].get().strip(),
                    title=v["tit"].get().strip(), composer=v["aut"].get().strip(),
                    quant=v["quant"].get(), bpm=bpm, meter=v["tempo"].get(),
                    motore=v["motore"].get(), opz={k: x.get() for k, x in b.items()})
+        _salva_impostazioni({"out": par["out_dir"], "quant": par["quant"], "motore": par["motore"],
+                             **par["opz"]})
+        lettore.ferma()
+        stato.update(ris=None, pagine=[], pag=0, lavoro=True, t0=time.time(), pct=0.0, meta=5.0,
+                     audio=None if (is_youtube(src) or is_midi(src)) else src)
+        abilita_risultati()
         txt.delete("1.0", "end")
-        btn.config(state="disabled", text="elaborazione in corso…")
+        tela.delete("all")
+        v["pagina"].set("")
+        v["tappa"].set("Avvio…")
+        btn.state(["disabled"])
+        btn.config(text="elaborazione in corso…")
         threading.Thread(target=worker, args=(par,), daemon=True).start()
 
     btn.config(command=start)
+    root.bind("<Return>", lambda e: start())
+
+    def chiudi():
+        if stato["lavoro"] and not prova and not messagebox.askyesno(
+                "Uscire?", "La partitura è ancora in elaborazione. Uscire comunque?"):
+            return
+        lettore.ferma()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", chiudi)
+    ciclo()
+
+    if prova:
+        # collaudo automatico dell'interfaccia
+        esito = {"codice": 1}
+        imposta_sorgente(prova)
+        v["tit"].set("Collaudo interfaccia")
+        v["bpm"].set("138")
+        root.after(500, start)
+
+        def controlla():
+            if stato["esito"] is None and time.time() - stato["t0"] < 900:
+                root.after(500, controlla)
+                return
+            ok = bool(stato["esito"]) and len(stato["pagine"]) > 0
+            print(f"COLLAUDO GUI: esito={stato['esito']} pagine={len(stato['pagine'])} "
+                  f"dnd={dnd} lettore={lettore.ok} barra={barra['value']}")
+            if ok and lettore.ok:
+                try:
+                    lettore.suona(os.path.splitext(stato["ris"]["xml"])[0] + ".mid")
+                    print("COLLAUDO GUI: lettore MIDI", lettore.stato())
+                except Exception as e:
+                    print(f"COLLAUDO GUI: lettore MIDI non disponibile qui ({e})")
+                lettore.ferma()
+            esito["codice"] = 0 if ok else 1
+            root.after(300, root.destroy)
+
+        root.after(1000, controlla)
+        root.mainloop()
+        return esito["codice"]
     root.mainloop()
+    return 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2729,6 +3154,8 @@ def main():
             print(f"ERRORE {type(e).__name__}: {e}")
             ok = False
         sys.exit(0 if ok else 3)
+    if len(sys.argv) >= 3 and sys.argv[1] == "--prova-gui":
+        sys.exit(launch_gui(prova=sys.argv[2]))
     ap = argparse.ArgumentParser(description="Audio di pianoforte → partitura PDF.")
     ap.add_argument("source", nargs="?", help="file audio, file MIDI o link YouTube")
     ap.add_argument("-o", "--out", default="./partiture", help="cartella di uscita")

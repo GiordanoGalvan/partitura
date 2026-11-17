@@ -14,3 +14,6 @@ moduleconf
 pretty_midi
 mir_eval
 yt-dlp
+pillow
+pypdfium2
+tkinterdnd2

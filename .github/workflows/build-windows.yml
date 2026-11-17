@@ -49,6 +49,12 @@ jobs:
           python partitura.py tests/prova.wav -o collaudo_py -t "Collaudo" --bpm 138
           if (-not (Test-Path collaudo_py/Collaudo.pdf)) { Get-Content collaudo_py/partitura_ultimo.log; exit 1 }
 
+      - name: Collaudo dell'interfaccia
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath python -ArgumentList @("partitura.py","--prova-gui","tests\prova.mid") -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) { exit 1 }
+
       - name: FFmpeg da includere
         shell: pwsh
         run: |
@@ -75,6 +81,11 @@ jobs:
             if (Test-Path $crash) { Write-Host "--- errore.log"; Get-Content $crash; Remove-Item $crash }
             if (Test-Path "$out/Collaudo.pdf") { Write-Host "OK $($caso[1])" } else { $fallito = $true }
           }
+          $p = Start-Process -FilePath $exe -ArgumentList @("--prova-gui","`"$(Join-Path $PWD 'tests\prova.wav')`"") -Wait -PassThru -NoNewWindow
+          Write-Host "== interfaccia: codice di uscita $($p.ExitCode)"
+          $crash = Join-Path $env:LOCALAPPDATA "Partitura\errore.log"
+          if (Test-Path $crash) { Get-Content $crash }
+          if ($p.ExitCode -ne 0) { $fallito = $true }
           if ($fallito) { exit 1 }
 
       - uses: actions/upload-artifact@v4

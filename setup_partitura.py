@@ -39,6 +39,7 @@ TARGET_VERSIONS = ["3.12", "3.11", "3.13", "3.10"]
 BASE = [
     "numpy", "scipy", "soundfile", "audioread", "soxr", "librosa",
     "music21", "mido", "verovio", "svglib", "reportlab",
+    "pillow", "pypdfium2", "tkinterdnd2",
 ]
 # Transkun: il motore di trascrizione. Va installato SENZA dipendenze perché
 # ne dichiara una (ncls) che su Windows richiede un compilatore C e che per

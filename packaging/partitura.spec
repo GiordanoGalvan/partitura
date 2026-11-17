@@ -4,7 +4,8 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 datas, binaries, hidden = [], [], []
 for pkg in ("verovio", "transkun", "moduleconf", "music21", "librosa", "svglib",
             "reportlab", "soundfile", "soxr", "pretty_midi", "mir_eval", "yt_dlp",
-            "audioread", "mido", "piano_transcription_inference"):
+            "audioread", "mido", "piano_transcription_inference",
+            "tkinterdnd2", "pypdfium2", "pypdfium2_raw"):
     try:
         d, b, h = collect_all(pkg)
         datas += d; binaries += b; hidden += h
@@ -12,6 +13,7 @@ for pkg in ("verovio", "transkun", "moduleconf", "music21", "librosa", "svglib",
         pass
 hidden += collect_submodules("transkun") + collect_submodules("scipy")
 binaries += [("ffmpeg.exe", ".")]
+datas += [("partitura.ico", ".")]
 
 a = Analysis(["../partitura.py"], pathex=[".."], datas=datas, binaries=binaries,
              hiddenimports=hidden, excludes=["matplotlib", "IPython", "jupyter", "tkinter.test"])
