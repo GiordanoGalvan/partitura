@@ -60,17 +60,28 @@ jobs:
       - name: Collaudo dell'app compilata
         shell: pwsh
         run: |
-          $exe = "dist/Partitura/Partitura.exe"
-          foreach ($caso in @(@("tests/prova.mid","da MIDI"), @("tests/prova.wav","da audio"))) {
-            $out = "collaudo_exe_" + ($caso[1] -replace ' ','_')
-            $p = Start-Process $exe -ArgumentList "`"$($caso[0])`"","-o","$out","-t","Collaudo","--bpm","138" -Wait -PassThru
-            if (-not (Test-Path "$out/Collaudo.pdf")) {
-              Write-Host "FALLITO $($caso[1]) (codice $($p.ExitCode))"
-              if (Test-Path "$out/partitura_ultimo.log") { Get-Content "$out/partitura_ultimo.log" }
-              exit 1
-            }
-            Write-Host "OK $($caso[1])"
+          $exe = (Resolve-Path "dist/Partitura/Partitura.exe").Path
+          $fallito = $false
+          foreach ($caso in @(@("tests\prova.mid","midi"), @("tests\prova.wav","audio"))) {
+            $out = Join-Path $PWD "collaudo_exe_$($caso[1])"
+            $src = Join-Path $PWD $caso[0]
+            $p = Start-Process -FilePath $exe -ArgumentList @("`"$src`"","-o","`"$out`"","-t","Collaudo","--bpm","138") -Wait -PassThru -NoNewWindow
+            Write-Host "== $($caso[1]): codice di uscita $($p.ExitCode)"
+            if (Test-Path "$out/partitura_ultimo.log") { Get-Content "$out/partitura_ultimo.log" }
+            $crash = Join-Path $env:LOCALAPPDATA "Partitura\errore.log"
+            if (Test-Path $crash) { Write-Host "--- errore.log"; Get-Content $crash; Remove-Item $crash }
+            if (Test-Path "$out/Collaudo.pdf") { Write-Host "OK $($caso[1])" } else { $fallito = $true }
           }
+          if ($fallito) { exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnosi
+          path: |
+            collaudo_exe_*
+            build/partitura/warn-partitura.txt
+          retention-days: 7
 
       - name: Installatore
         shell: pwsh

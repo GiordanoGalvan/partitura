@@ -2762,5 +2762,30 @@ def main():
                       musescore=args.musescore))
 
 
+def _registra_crash():
+    """Nell'app compilata non c'è console: un errore fatale va scritto su file."""
+    import traceback
+    testo = traceback.format_exc()
+    for cartella in (os.environ.get("LOCALAPPDATA", ""), os.path.expanduser("~"), os.getcwd()):
+        try:
+            d = os.path.join(cartella, "Partitura") if cartella else "Partitura"
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "errore.log"), "w", encoding="utf-8") as f:
+                f.write(f"PARTITURA {VERSIONE}\n{' '.join(sys.argv)}\n\n{testo}")
+            break
+        except Exception:
+            continue
+    try:
+        print(testo, file=sys.stderr)
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException:
+        _registra_crash()
+        sys.exit(1)
