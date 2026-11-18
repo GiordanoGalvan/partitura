@@ -46,6 +46,15 @@ def _traccia(msg: str):
 
 
 _traccia(f"--- avvio {sys.executable} {sys.argv[1:]}")
+if getattr(sys, "frozen", False):
+    # Installata in «Programmi» la cartella dell'app è di sola lettura: le
+    # cache (numba di librosa, ecc.) vanno nella cartella dell'utente.
+    _cache = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+                          "Partitura", "cache")
+    os.makedirs(_cache, exist_ok=True)
+    os.environ.setdefault("NUMBA_CACHE_DIR", os.path.join(_cache, "numba"))
+    os.environ.setdefault("MPLCONFIGDIR", os.path.join(_cache, "mpl"))
+    os.environ.setdefault("TORCH_HOME", os.path.join(_cache, "torch"))
 import re
 import json
 import math
@@ -70,7 +79,7 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-VERSIONE = "3.0.1"
+VERSIONE = "3.0.2"
 
 # App compilata (installatore Windows): niente interprete Python separato, e
 # FFmpeg viaggia nella stessa cartella dell'eseguibile.
@@ -3011,6 +3020,7 @@ def launch_gui(prova: Optional[str] = None):
             import traceback
             coda.put(("riga", "\nERRORE: " + str(e)))
             coda.put(("riga", traceback.format_exc()))
+            _traccia("ERRORE nell'elaborazione:\n" + traceback.format_exc())
             coda.put(("errore", str(e)))
 
     def avanza(line: str):
