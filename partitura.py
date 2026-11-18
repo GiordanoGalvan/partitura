@@ -27,8 +27,26 @@ Uso:
 """
 
 import os
-import re
 import sys
+import time as _time
+
+
+def _traccia(msg: str):
+    """Nell'app installata annota ogni passo dell'avvio: se si blocca o si
+    chiude da sola, l'ultimo passo scritto dice dove."""
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        d = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "Partitura")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "avvio.log"), "a", encoding="utf-8") as f:
+            f.write(f"{_time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
+
+
+_traccia(f"--- avvio {sys.executable} {sys.argv[1:]}")
+import re
 import json
 import math
 import shutil
@@ -40,7 +58,9 @@ from dataclasses import dataclass, field
 from fractions import Fraction as F
 from typing import List, Optional, Tuple, Dict
 
+_traccia("importo numpy")
 import numpy as np
+_traccia("numpy pronto")
 
 # Su Windows la console e i tubi fra processi usano cp1252: senza questo, un
 # carattere come «─» o «→» fa fallire la stampa.
@@ -50,7 +70,7 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-VERSIONE = "3.0"
+VERSIONE = "3.0.1"
 
 # App compilata (installatore Windows): niente interprete Python separato, e
 # FFmpeg viaggia nella stessa cartella dell'eseguibile.
@@ -2673,11 +2693,13 @@ def launch_gui(prova: Optional[str] = None):
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
 
+    _traccia("apro la finestra")
     try:
         from tkinterdnd2 import TkinterDnD, DND_FILES
         root = TkinterDnD.Tk()
         dnd = True
-    except Exception:
+    except Exception as e:
+        _traccia(f"trascinamento non disponibile: {type(e).__name__}: {e}")
         root = tk.Tk()
         dnd = False
     root.title(f"Partitura {VERSIONE}")
@@ -3093,6 +3115,7 @@ def launch_gui(prova: Optional[str] = None):
 
     root.protocol("WM_DELETE_WINDOW", chiudi)
     ciclo()
+    _traccia("finestra pronta")
 
     if prova:
         # collaudo automatico dell'interfaccia
@@ -3172,7 +3195,9 @@ def main():
     ap.add_argument("--musescore", action="store_true", help="impagina con MuseScore")
     args = ap.parse_args()
 
+    _traccia("controllo i pacchetti")
     manca = controlla_dipendenze()
+    _traccia(f"pacchetti mancanti: {manca}")
     if manca:
         print("\n  Mancano dei pacchetti: " + ", ".join(manca))
         print(f"  {sys.executable} -m pip install {' '.join(manca)}")
@@ -3214,5 +3239,6 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except BaseException:
+        _traccia("ERRORE FATALE, dettagli in errore.log")
         _registra_crash()
         sys.exit(1)
