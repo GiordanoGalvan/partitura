@@ -46,6 +46,20 @@ def _traccia(msg: str):
 
 
 _traccia(f"--- avvio {sys.executable} {sys.argv[1:]}")
+# App a finestra (senza console): stdout e stderr non esistono e qualunque
+# pacchetto che stampi un avviso (music21 lo fa) farebbe crollare l'app.
+# Li dirigo su un file nella cartella dell'utente.
+if sys.stdout is None or sys.stderr is None:
+    try:
+        _d = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "Partitura")
+        os.makedirs(_d, exist_ok=True)
+        _uscita = open(os.path.join(_d, "console.log"), "w", encoding="utf-8", buffering=1)
+    except Exception:
+        _uscita = open(os.devnull, "w", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = _uscita
+    if sys.stderr is None:
+        sys.stderr = _uscita
 if getattr(sys, "frozen", False):
     # Installata in «Programmi» la cartella dell'app è di sola lettura: le
     # cache (numba di librosa, ecc.) vanno nella cartella dell'utente.
@@ -79,7 +93,7 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-VERSIONE = "3.0.2"
+VERSIONE = "3.0.3"
 
 # App compilata (installatore Windows): niente interprete Python separato, e
 # FFmpeg viaggia nella stessa cartella dell'eseguibile.

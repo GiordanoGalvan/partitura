@@ -114,10 +114,14 @@ jobs:
           if (-not (Test-Path $exe)) { Write-Host "non installata in $exe"; exit 1 }
           $d = Join-Path $env:LOCALAPPDATA "Partitura"
           Remove-Item "$d\avvio.log","$d\errore.log" -ErrorAction SilentlyContinue
-          $p = Start-Process -FilePath $exe -ArgumentList @("--prova-gui","`"$(Join-Path $PWD 'tests\prova.mid')`"") -Wait -PassThru
-          Write-Host "== app installata: codice di uscita $($p.ExitCode)"
-          foreach ($f in "avvio.log","errore.log") { if (Test-Path "$d\$f") { Write-Host "--- $f"; Get-Content "$d\$f" } }
-          if ($p.ExitCode -ne 0) { exit 1 }
+          $fallito = $false
+          foreach ($f in "prova.mid","prova.wav") {
+            $p = Start-Process -FilePath $exe -ArgumentList @("--prova-gui","`"$(Join-Path $PWD "tests\$f")`"") -Wait -PassThru
+            Write-Host "== app installata, $f : codice di uscita $($p.ExitCode)"
+            if ($p.ExitCode -ne 0) { $fallito = $true }
+          }
+          foreach ($f in "avvio.log","errore.log","console.log") { if (Test-Path "$d\$f") { Write-Host "--- $f"; Get-Content "$d\$f" } }
+          if ($fallito) { exit 1 }
 
       - uses: actions/upload-artifact@v4
         with:
